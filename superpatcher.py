@@ -72,6 +72,12 @@ EXE_PATCH = [
 ]
 
 
+# From the Core of Light build after 0.6.0-beta.3 the slot sizes are toml settings: when the executable
+# knows them, they are written in the toml and the executable is left alone.
+SLOT_SETTING = b'hero_data_slot_size'
+SLOT_SETTINGS = {'hero_data_slot_size': '0x279800', 'vehicle_slot_size': '0x2C2000'}
+
+
 def patch_exe(b):
     """Enlarges the memory slots in the executable. Returns (patched bytes or None, message)."""
     b = bytearray(b)
@@ -514,33 +520,52 @@ def make_test_copy(root, out_arch, dest):
         shutil.copyfile(os.path.join(out_arch, f), t)
     exe = os.path.join(dest, EXE_NAME)
     b = open(exe, 'rb').read()
-    os.remove(exe)                       # drop the link before writing
-    patched, msg = patch_exe(b)
-    open(exe, 'wb').write(patched or b)
+    toml = os.path.join(dest, TOML_NAME)
+    t = open(toml, encoding='utf-8').read() if os.path.exists(toml) else ''
+    if SLOT_SETTING in b:
+        msg = 'memory slots set in %s, executable unchanged' % TOML_NAME
+        t = set_slot_settings(t)
+    else:
+        os.remove(exe)                   # drop the link before writing
+        patched, msg = patch_exe(b)
+        open(exe, 'wb').write(patched or b)
     vb = os.path.join(dest, 'rom', VRAM_NAME)
     if os.path.exists(vb):
         t = open(vb, 'rb').read()
         os.remove(vb)
         open(vb, 'wb').write(patch_vram(t))
-    toml = os.path.join(dest, TOML_NAME)
     if os.path.exists(toml):
-        t = open(toml, encoding='utf-8').read()
         os.remove(toml)
-        if re.search(r'^\s*portal_menu_nintendo\s*=', t, re.M):
-            t = re.sub(r'^(\s*portal_menu_nintendo\s*=\s*)\w+', r'\1true', t, flags=re.M)
-        else:
-            lines = t.split('\n')
-            sec = [k for k, l in enumerate(lines) if re.fullmatch(r'\s*\[\s*"?Portal"?\s*\]\s*', l)]
-            if sec:
-                lines.insert(sec[0] + 1, 'portal_menu_nintendo = true')
-            else:
-                lines += ['', '["Portal"]', 'portal_menu_nintendo = true']
-            t = '\n'.join(lines)
-        open(toml, 'w', encoding='utf-8').write(t)
+    open(toml, 'w', encoding='utf-8').write(toml_set(t, 'Portal', 'portal_menu_nintendo', 'true'))
     open(os.path.join(dest, 'Launch SuperChargers superpatcher.bat'), 'w', newline='\r\n').write(
         '@echo off\ncd /d "%~dp0"\nstart "" ' + EXE_NAME +
         ' --user_data_root="%USERPROFILE%\\Documents\\Skylanders\\SuperChargers superpatcher"\n')
     return msg
+
+
+def toml_set(t, section, key, value):
+    """Sets key = value in [section] of a toml text, adding the key or the section if missing."""
+    lines = t.split('\n')
+    head = re.compile(r'\s*\[\s*"?%s"?\s*\]\s*$' % re.escape(section))
+    sec = next((k for k, l in enumerate(lines) if head.match(l)), None)
+    if sec is None:
+        if lines and lines[-1].strip():
+            lines.append('')
+        lines += ['["%s"]' % section, '%s = %s' % (key, value)]
+        return '\n'.join(lines)
+    end = next((k for k in range(sec + 1, len(lines)) if re.match(r'\s*\[', lines[k])), len(lines))
+    for k in range(sec + 1, end):
+        if re.match(r'\s*%s\s*=' % re.escape(key), lines[k]):
+            lines[k] = re.sub(r'^(\s*%s\s*=\s*)[^#]*?(\s*(#.*)?)$' % re.escape(key), r'\g<1>%s\2' % value, lines[k])
+            return '\n'.join(lines)
+    lines.insert(sec + 1, '%s = %s' % (key, value))
+    return '\n'.join(lines)
+
+
+def set_slot_settings(t):
+    for k, v in reversed(list(SLOT_SETTINGS.items())):    # each key goes right under the header
+        t = toml_set(t, 'Mods', k, v)
+    return t
 
 
 def patch_exe_in_place(root):
@@ -548,6 +573,13 @@ def patch_exe_in_place(root):
     if not os.path.exists(exe):
         raise SystemExit('%s not found in %s' % (EXE_NAME, root))
     b = open(exe, 'rb').read()
+    if SLOT_SETTING in b:
+        toml = os.path.join(root, TOML_NAME)
+        t = open(toml, encoding='utf-8').read() if os.path.exists(toml) else ''
+        new = set_slot_settings(t)
+        if new != t:
+            open(toml, 'w', encoding='utf-8').write(new)
+        return 'memory slots set in %s (this Core of Light build reads them there, executable unchanged)' % TOML_NAME
     patched, msg = patch_exe(b)
     if patched:
         backup = exe + '.orig'
