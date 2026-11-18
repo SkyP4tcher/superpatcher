@@ -44,10 +44,14 @@ python3 superpatcher.py --wiiu "<extracted SuperChargers Wii U>" \
   - In the `.toml` file it enables `portal_menu_nintendo`, the Core of Light option that shows these
     figures in the portal menu.
   - It adds a launcher `.bat` that uses separate save files.
-  - For the tested Core of Light version it also enlarges the executable's memory slots. With a
-    different version the executable is left unchanged and the summary says so.
+  - It enlarges the hero and vehicle memory slots in the executable. The code is found by its
+    surrounding bytes, so it works across Core of Light builds (checked on 0.5.0-beta.9 and
+    0.6.0-beta.2). If it is not recognized the executable is left unchanged and the summary says so.
   - It raises the video memory budget for characters and vehicles (`VramBudget.igx`).
 - `--languages es,it`: forces the languages instead of detecting them from the Xbox 360 game.
+- `--patch-exe "<Core of Light folder>"`: only enlarges the memory slots of the executable, keeping
+  the original as `superchargersrecompiled.exe.orig`. A Core of Light update replaces the executable
+  and the game then crashes when loading the added characters: run this after every update.
 
 The conversion takes a few minutes. Every file written is checked again: format, archive indexes and,
 for audio, a full decode with ffmpeg. If a check fails the script stops.

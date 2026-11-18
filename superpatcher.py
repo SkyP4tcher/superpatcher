@@ -22,7 +22,7 @@ Usage:
 
 Requires Python 3 with numpy, and ffmpeg (xma2 decoder) to verify the audio.
 """
-import argparse, hashlib, os, re, shutil, struct, sys, tempfile, time
+import argparse, os, re, shutil, struct, sys, tempfile, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import numpy as np
 from concurrent.futures import ProcessPoolExecutor
@@ -62,12 +62,38 @@ SYSTEM_DATA = 'LooseData/systemData.igz'
 DC_ICONS = ('Bowser_tga__material', 'DonkeyKong_tga__material')
 SECTOR_AUDIO = 0x800
 
-# recompiled executable: hero and vehicle memory slots, only for the verified build
+# recompiled executable: hero and vehicle memory slots. The code moves between Core of Light builds,
+# so each change is found by its surrounding bytes, which must match exactly once.
+# (signature, [(offset in the signature, old byte, new byte)])
 EXE_NAME = 'superchargersrecompiled.exe'
-EXE_MD5 = '1d8a2bd51cdd6b8ce576c516ed04be41'     # 0.5.0-beta.9 29e7578
-EXE_PATCH = [(0x3AD77BF, 0x17, 0x27),            # hero data 0x179800 -> 0x279800
-             (0x458F446, 0x1C, 0x2C),            # vehicle slot 0x1C2000 -> 0x2C2000
-             (0x458F44A, 0x1C, 0x2C)]
+EXE_PATCH = [
+    (bytes.fromhex('41bb0017980047891c0a'), [(3, 0x17, 0x27)]),                 # hero data 0x179800 -> 0x279800
+    (bytes.fromhex('48c7415800201c00b8001c2000'), [(6, 0x1C, 0x2C), (10, 0x1C, 0x2C)]),  # vehicle slot 0x1C2000 -> 0x2C2000
+]
+
+
+def patch_exe(b):
+    """Enlarges the memory slots in the executable. Returns (patched bytes or None, message)."""
+    b = bytearray(b)
+    todo = []
+    for sig, changes in EXE_PATCH:
+        done = bytearray(sig)
+        for k, _, new in changes:
+            done[k] = new
+        if b.count(sig) == 1:
+            todo.append((b.find(sig), changes))
+        elif b.count(sig) == 0 and b.count(bytes(done)) == 1:
+            continue                     # already patched
+        else:
+            return None, ('executable NOT modified: memory slot code not recognized in this Core of Light '
+                          'build, the game may run out of memory loading the added characters and vehicles')
+    if not todo:
+        return None, 'executable: memory slots already enlarged'
+    for pos, changes in todo:
+        for k, old, new in changes:
+            assert b[pos + k] == old
+            b[pos + k] = new
+    return bytes(b), 'executable: hero and vehicle memory slots enlarged'
 TOML_NAME = 'superchargersrecomp.toml'
 VRAM_NAME = 'VramBudget.igx'
 VRAM_XENON = {'_character': '14', '_vehicle': '14'}   # MB per character and vehicle (was 8 and 10)
@@ -487,16 +513,10 @@ def make_test_copy(root, out_arch, dest):
             os.remove(t)                 # drop the link: the original does not change
         shutil.copyfile(os.path.join(out_arch, f), t)
     exe = os.path.join(dest, EXE_NAME)
-    b = bytearray(open(exe, 'rb').read())
-    os.remove(exe)
-    if hashlib.md5(b).hexdigest() == EXE_MD5 and all(b[o] == old for o, old, _ in EXE_PATCH):
-        for o, _, new in EXE_PATCH:
-            b[o] = new
-        msg = 'executable: hero and vehicle memory slots enlarged'
-    else:
-        msg = ('executable NOT modified: build differs from the verified one, the game may run out of '
-               'memory loading the added characters and vehicles')
-    open(exe, 'wb').write(b)
+    b = open(exe, 'rb').read()
+    os.remove(exe)                       # drop the link before writing
+    patched, msg = patch_exe(b)
+    open(exe, 'wb').write(patched or b)
     vb = os.path.join(dest, 'rom', VRAM_NAME)
     if os.path.exists(vb):
         t = open(vb, 'rb').read()
@@ -523,16 +543,40 @@ def make_test_copy(root, out_arch, dest):
     return msg
 
 
+def patch_exe_in_place(root):
+    exe = os.path.join(root, EXE_NAME)
+    if not os.path.exists(exe):
+        raise SystemExit('%s not found in %s' % (EXE_NAME, root))
+    b = open(exe, 'rb').read()
+    patched, msg = patch_exe(b)
+    if patched:
+        backup = exe + '.orig'
+        if os.path.exists(backup):
+            os.remove(backup)
+        os.replace(exe, backup)
+        open(exe, 'wb').write(patched)
+        msg += ' (original kept as %s)' % os.path.basename(backup)
+    return msg
+
+
 # ---------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser(description='Wii U characters and challenges in the recompiled SuperChargers 360')
-    ap.add_argument('--wiiu', required=True, help='extracted SuperChargers Wii U folder')
-    ap.add_argument('--x360', required=True, help='Core of Light folder with SuperChargers')
-    ap.add_argument('--output', required=True, help='folder for the modified files')
+    ap.add_argument('--wiiu', help='extracted SuperChargers Wii U folder')
+    ap.add_argument('--x360', help='Core of Light folder with SuperChargers')
+    ap.add_argument('--output', help='folder for the modified files')
     ap.add_argument('--test-copy', help='new folder for a separate installation')
     ap.add_argument('--languages', help='e.g. es,it (default: from the Xbox 360 game)')
     ap.add_argument('--jobs', type=int, default=max(1, (os.cpu_count() or 2) - 2))
+    ap.add_argument('--patch-exe', metavar='FOLDER',
+                    help='only enlarge the memory slots of the executable in a Core of Light folder, '
+                         'for example after a Core of Light update (a backup is kept)')
     a = ap.parse_args()
+    if a.patch_exe:
+        print(patch_exe_in_place(a.patch_exe))
+        return
+    if not (a.wiiu and a.x360 and a.output):
+        ap.error('--wiiu, --x360 and --output are required')
     t0 = time.time()
     import subprocess
     try:
