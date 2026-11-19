@@ -32,6 +32,24 @@ The script does not decrypt or download anything and only reads the files it is 
 
 ## Usage
 
+Install into the Core of Light folder itself, and undo it:
+
+```
+python3 superpatcher.py --wiiu "<extracted SuperChargers Wii U>" --install "<Core of Light SuperChargers folder>"
+python3 superpatcher.py --uninstall "<Core of Light SuperChargers folder>"
+```
+
+- `--install` converts, copies the files into `rom/archives` and sets the memory slots, the video
+  memory budget and `portal_menu_nintendo`, as listed under `--test-copy` below. Everything it replaces
+  goes into `superpatcher-backup` in the game folder, with a `manifest.json` of every change. Running
+  it again first puts the originals back, so it also updates an install.
+- `--uninstall` puts the original files and settings back and removes the backup folder. A file that
+  something else changed after the install (a Core of Light update, a file check) is left as it is.
+- While working the script prints lines like `PROGRESS 12/28 sound banks: Bowser`, for a front end
+  that shows how far it is.
+
+Or write the converted files to a folder, optionally with a separate test installation:
+
 ```
 python3 superpatcher.py --wiiu "<extracted SuperChargers Wii U>" \
     --x360 "<Core of Light folder with SuperChargers>" \

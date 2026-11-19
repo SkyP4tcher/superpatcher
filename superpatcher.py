@@ -27,10 +27,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import numpy as np
 from concurrent.futures import ProcessPoolExecutor
 import iga, igawrite, conv, fsb, xma, xma_ms, wfix_lib
+import install as inst
+from install import toml_set
 from igz import Igz, fnv1a
 from igzw import IgzDoc, objects
 
 ALL_LANGS = conv.ALL_LANGS
+VERSION = '0.2.0'
+BACKUP_NAME = 'superpatcher-backup'      # inside the game folder, made by --install
 
 # ---------------------------------------------------------------- content
 TOY_PAKS = ['Bowser', 'Bowser_AbilityUpgrades', 'DonkeyKong', 'DonkeyKong_AbilityUpgrades',
@@ -420,7 +424,7 @@ def pak_bytes(encoded, src):
     return head + sum(fsb_size(d) for d in encoded) + struct.unpack_from('>I', b, 0x30)[0]
 
 
-def build_toy_audio(wiiu, out, langs, pool, work):
+def build_toy_audio(wiiu, out, langs, pool, work, step=lambda label: None):
     report = []
     for g, (slot, paks, lv) in AUDIO_GROUPS.items():
         names = paks + ['%s_%s' % (lv, l) for l in langs]
@@ -446,10 +450,11 @@ def build_toy_audio(wiiu, out, langs, pool, work):
             report.append('%-36s %3d sounds  SNR min %.1f mean %.1f dB' % (p, len(src[p]), mn, avg))
         report.append('== %s: %d bytes, %.1f%% of the slot' % (g, total, 100.0 * total / slot))
         log(report[-1])
+        step('sound banks: ' + g)
     return report
 
 
-def build_dc_audio(wiiu, out, langs, pool, work):
+def build_dc_audio(wiiu, out, langs, pool, work, step=lambda label: None):
     report = []
     for p in DC_AUDIO + ['%s_%s' % (b, l) for b in DC_GENBANK for l in langs]:
         entries = load_bank(os.path.join(wiiu, p + '.pak'), work, dc=True)
@@ -457,6 +462,7 @@ def build_dc_audio(wiiu, out, langs, pool, work):
         mn, avg = write_bank(os.path.join(wiiu, p + '.pak'), os.path.join(out, p + '.pak'), entries, enc, work, 10)
         report.append('%-36s %3d sounds  SNR min %.1f mean %.1f dB' % (p, len(entries), mn, avg))
         log(report[-1])
+        step('sound banks: ' + p)
     return report
 
 
@@ -543,25 +549,6 @@ def make_test_copy(root, out_arch, dest):
     return msg
 
 
-def toml_set(t, section, key, value):
-    """Sets key = value in [section] of a toml text, adding the key or the section if missing."""
-    lines = t.split('\n')
-    head = re.compile(r'\s*\[\s*"?%s"?\s*\]\s*$' % re.escape(section))
-    sec = next((k for k, l in enumerate(lines) if head.match(l)), None)
-    if sec is None:
-        if lines and lines[-1].strip():
-            lines.append('')
-        lines += ['["%s"]' % section, '%s = %s' % (key, value)]
-        return '\n'.join(lines)
-    end = next((k for k in range(sec + 1, len(lines)) if re.match(r'\s*\[', lines[k])), len(lines))
-    for k in range(sec + 1, end):
-        if re.match(r'\s*%s\s*=' % re.escape(key), lines[k]):
-            lines[k] = re.sub(r'^(\s*%s\s*=\s*)[^#]*?(\s*(#.*)?)$' % re.escape(key), r'\g<1>%s\2' % value, lines[k])
-            return '\n'.join(lines)
-    lines.insert(sec + 1, '%s = %s' % (key, value))
-    return '\n'.join(lines)
-
-
 def set_slot_settings(t):
     for k, v in reversed(list(SLOT_SETTINGS.items())):    # each key goes right under the header
         t = toml_set(t, 'Mods', k, v)
@@ -591,6 +578,27 @@ def patch_exe_in_place(root):
     return msg
 
 
+def install_into(root, out_arch, report_lines):
+    """Copies the converted files into a Core of Light folder and sets the files and settings the
+    added toys need, keeping everything it replaces (see install.py)."""
+    ins = inst.Installer(root, BACKUP_NAME, 'superpatcher ' + VERSION)
+    for f in sorted(os.listdir(out_arch)):
+        ins.put(os.path.join('rom', 'archives', f), open(os.path.join(out_arch, f), 'rb').read())
+    exe = os.path.join(root, EXE_NAME)
+    if os.path.exists(exe) and SLOT_SETTING in open(exe, 'rb').read():
+        for k, v in SLOT_SETTINGS.items():
+            ins.setting(TOML_NAME, 'Mods', k, v)
+        msg = 'memory slots set in %s' % TOML_NAME
+    else:
+        msg = 'executable NOT modified: memory slot code not recognized in this Core of Light build'
+        if ins.edit(EXE_NAME, lambda b: patch_exe(b)[0]):
+            msg = 'executable: hero and vehicle memory slots enlarged'
+    ins.edit(os.path.join('rom', VRAM_NAME), patch_vram)
+    ins.setting(TOML_NAME, 'Portal', 'portal_menu_nintendo', 'true')
+    open(os.path.join(ins.backup, 'summary.txt'), 'w', encoding='utf-8').write('\n'.join(report_lines + [msg]) + '\n')
+    return msg
+
+
 # ---------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser(description='Wii U characters and challenges in the recompiled SuperChargers 360')
@@ -603,12 +611,29 @@ def main():
     ap.add_argument('--patch-exe', metavar='FOLDER',
                     help='only enlarge the memory slots of the executable in a Core of Light folder, '
                          'for example after a Core of Light update (a backup is kept)')
+    ap.add_argument('--install', metavar='FOLDER',
+                    help='convert and install into a Core of Light SuperChargers folder, keeping what is '
+                         'replaced in %s (needs --wiiu)' % BACKUP_NAME)
+    ap.add_argument('--uninstall', metavar='FOLDER', help='put back everything --install changed')
+    ap.add_argument('--version', action='version', version='superpatcher ' + VERSION)
     a = ap.parse_args()
     if a.patch_exe:
         print(patch_exe_in_place(a.patch_exe))
         return
-    if not (a.wiiu and a.x360 and a.output):
-        ap.error('--wiiu, --x360 and --output are required')
+    if a.uninstall:
+        log('\n'.join(inst.uninstall(a.uninstall, BACKUP_NAME)))
+        return
+    if a.install:
+        if not a.wiiu:
+            ap.error('--install needs --wiiu')
+        if not os.path.exists(os.path.join(a.install, EXE_NAME)):
+            raise SystemExit('%s not found in %s: give the Core of Light SuperChargers folder' % (EXE_NAME, a.install))
+        if inst.installed(a.install, BACKUP_NAME):
+            log('already installed: putting the original files back first')
+            log('\n'.join(inst.uninstall(a.install, BACKUP_NAME)))
+        a.x360 = a.install
+    elif not (a.wiiu and a.x360 and a.output):
+        ap.error('--wiiu, --x360 and --output are required (or --install / --uninstall)')
     t0 = time.time()
     import subprocess
     try:
@@ -627,7 +652,8 @@ def main():
     log('Xbox 360 game: %s, languages %s' % (arch, ','.join(langs)))
 
     wiiu = find_wiiu(a.wiiu)
-    out = os.path.join(a.output, 'archives')
+    work = tempfile.mkdtemp(prefix='superpatcher_')
+    out = os.path.join(a.output or os.path.join(work, 'output'), 'archives')
     need = [p + '.pak' for p in TOY_PAKS + DC_PAKS + DC_AUDIO + ['permanent', 'APA4', 'APL1']]
     for g, (_, paks, lv) in AUDIO_GROUPS.items():
         need += [p + '.pak' for p in paks] + ['%s_%s.pak' % (lv, l) for l in langs]
@@ -638,7 +664,12 @@ def main():
         raise SystemExit('Wii U files missing in %s: %s' % (wiiu, ', '.join(missing)))
     log('Wii U files: %s, all %d required files present' % (wiiu, len(need)))
     os.makedirs(out, exist_ok=True)
-    work = tempfile.mkdtemp(prefix='superpatcher_')
+    total = (len(TOY_PAKS + DC_PAKS) + 1 + len(MAPS) + len(AUDIO_GROUPS) + len(DC_AUDIO)
+             + len(DC_GENBANK) * len(langs) + 1 + (1 if a.install else 0))
+    done = [0]
+    def step(label):
+        done[0] += 1
+        inst.progress(done[0], total, label)
 
     report = ['languages: ' + ','.join(langs)]
     # 2. toys, vehicles and challenge levels
@@ -646,6 +677,7 @@ def main():
         files = convert_pak(os.path.join(wiiu, p + '.pak'), os.path.join(out, p + '.pak'), langs)
         report.append('%-36s %4d entries' % (p, check_pak(os.path.join(out, p + '.pak'), files, langs)))
         log(report[-1])
+        step('converted ' + p)
     for v in VIDEOS:
         shutil.copyfile(os.path.join(wiiu, v), os.path.join(out, v))
     # 3. figure registry and challenges visible in the menu
@@ -653,28 +685,36 @@ def main():
     check_pak(os.path.join(out, 'permanent.pak'), files, langs, os.path.join(arch, 'permanent.pak'))
     report.append('permanent.pak: %d entries added, permanent_pkg from Wii U, added driver challenges visible' % len(added))
     log(report[-1])
+    step('figure registry')
     # 4. challenge maps in the track paks
     for name in MAPS:
         files, stubs, add = build_map(arch, wiiu, name, os.path.join(out, name + '.pak'), langs)
         check_pak(os.path.join(out, name + '.pak'), files, langs, os.path.join(arch, name + '.pak'))
         report.append('%s.pak: map replaced, %d entries added, _pkg from Wii U' % (name, len(add)))
         log(report[-1])
+        step('driver challenge ' + name)
     # 5. audio to XMA
     audio_work = os.path.join(work, 'audio')
     os.makedirs(audio_work, exist_ok=True)
     with ProcessPoolExecutor(a.jobs) as pool:
-        report += build_toy_audio(wiiu, out, langs, pool, audio_work)
-        report += build_dc_audio(wiiu, out, langs, pool, audio_work)
+        report += build_toy_audio(wiiu, out, langs, pool, audio_work, step)
+        report += build_dc_audio(wiiu, out, langs, pool, audio_work, step)
     for f in os.listdir(out):
         if f.endswith('.pak') and (f.startswith(('CHAMP_', 'MAP_', 'MUSIC_')) or '_genbank_' in f):
             check_audio_pak(os.path.join(out, f), os.path.join(wiiu, f))
     first = len(report)
     report.append('checks passed on %d files' % len(os.listdir(out)))
+    step('checks')
+    if a.install:
+        report.append(install_into(a.install, out, report[:]))
+        report.append('installed into %s (undo with --uninstall)' % a.install)
+        step('installed')
     if a.test_copy:
         report.append(make_test_copy(os.path.abspath(a.x360), out, a.test_copy))
         report.append('test copy: ' + a.test_copy)
     report.append('time: %.0f s' % (time.time() - t0))
-    open(os.path.join(a.output, 'summary.txt'), 'w', encoding='utf-8').write('\n'.join(report) + '\n')
+    if a.output:
+        open(os.path.join(a.output, 'summary.txt'), 'w', encoding='utf-8').write('\n'.join(report) + '\n')
     log('\n'.join(report[first:]))
     shutil.rmtree(work, ignore_errors=True)   # temporary folder created here
 
